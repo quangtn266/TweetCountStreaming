@@ -1,11 +1,18 @@
 package com.quangtn.github;
 
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.google.common.collect.ImmutableList;
 import org.apache.flink.api.common.functions.FlatMapFunction;
 import org.apache.flink.api.common.functions.FoldFunction;
 import org.apache.flink.api.common.functions.RuntimeContext;
 import org.apache.flink.api.common.restartstrategy.RestartStrategies;
+import org.apache.flink.api.java.tuple.Tuple;
+import org.apache.flink.api.java.tuple.Tuple1;
+import org.apache.flink.api.java.tuple.Tuple2;
+import org.apache.flink.api.java.tuple.Tuple3;
 import org.apache.flink.api.java.utils.ParameterTool;
+import org.apache.flink.runtime.executiongraph.restart.FixedDelayRestartStrategy;
+import org.apache.flink.runtime.executiongraph.restart.RestartStrategyFactory;
 import org.apache.flink.runtime.state.filesystem.FsStateBackend;
 import org.apache.flink.streaming.api.TimeCharacteristic;
 import org.apache.flink.streaming.api.datastream.DataStream;
@@ -25,11 +32,8 @@ import org.apache.flink.streaming.connectors.kafka.FlinkKafkaProducer09;
 import org.apache.flink.streaming.util.serialization.JSONDeserializationSchema;
 import org.apache.flink.streaming.util.serialization.SerializationSchema;
 import org.apache.flink.util.Collector;
-import org.codehaus.jackson.node.ObjectNode;
 import org.elasticsearch.action.ActionRequest;
 import org.elasticsearch.client.Requests;
-import scala.Tuple2;
-import scala.Tuple3;
 
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
@@ -121,7 +125,7 @@ public class StreamingETL {
                 .timeWindow(Time.minutes(1L), Time.seconds(10L)).apply(new WordCountingWindow())
                 .name("Count word frequency (1 min, 10 sec sliding window)")
                 // build top n every 10 seconds
-                .timeWindowAll(Time.seconds(10L)).apply(new TopWords(10)).name("TopN window (10s)");
+                .timeWindowAll(Time.seconds(10L)).apply(new TopNWords(10)).name("TopN window (10s)");
 
         // write top Ns to Kafka topic
         topWordCount.addSink(new FlinkKafkaProducer09<>(params.getRequired("wc-topic"),
@@ -164,6 +168,20 @@ public class StreamingETL {
             json.put("window-start", result.f2);
 
             return Requests.indexRequest().index("twitter-stats").type("stats").source(json);
+        }
+    }
+
+    private static class WordCountingWindow implements WindowFunction<Tuple2<String, Long>,
+            Tuple2<String, Long>, Tuple, TimeWindow> {
+
+        @Override
+        public void apply(Tuple key, TimeWindow timeWindow, Iterable<Tuple2<String, Long>> iterable,
+        Collector<Tuple2<String, Long>> collector) throws Exception {
+            long count = 0;
+            for(Tuple2<String, Long> e: iterable) {
+                count+= e.f1;
+            }
+            collector.collect(Tuple2.of(((Tuple1<String>) key).f0, count));
         }
     }
 
