@@ -3,6 +3,7 @@ package com.quangtn.github;
 import com.google.common.collect.ImmutableList;
 import org.apache.flink.api.common.functions.FlatMapFunction;
 import org.apache.flink.api.common.functions.FoldFunction;
+import org.apache.flink.api.common.functions.RuntimeContext;
 import org.apache.flink.api.common.restartstrategy.RestartStrategies;
 import org.apache.flink.api.java.utils.ParameterTool;
 import org.apache.flink.runtime.state.filesystem.FsStateBackend;
@@ -10,24 +11,29 @@ import org.apache.flink.streaming.api.TimeCharacteristic;
 import org.apache.flink.streaming.api.datastream.DataStream;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
 import org.apache.flink.streaming.api.functions.timestamps.BoundedOutOfOrdernessTimestampExtractor;
+import org.apache.flink.streaming.api.functions.windowing.AllWindowFunction;
 import org.apache.flink.streaming.api.functions.windowing.WindowFunction;
 import org.apache.flink.streaming.api.windowing.time.Time;
+import org.apache.flink.streaming.api.windowing.windows.TimeWindow;
 import org.apache.flink.streaming.connectors.elasticsearch2.ElasticsearchSink;
+import org.apache.flink.streaming.connectors.elasticsearch2.ElasticsearchSinkFunction;
+import org.apache.flink.streaming.connectors.elasticsearch2.RequestIndexer;
 import org.apache.flink.streaming.connectors.fs.DateTimeBucketer;
 import org.apache.flink.streaming.connectors.fs.RollingSink;
 import org.apache.flink.streaming.connectors.kafka.FlinkKafkaConsumer09;
 import org.apache.flink.streaming.connectors.kafka.FlinkKafkaProducer09;
 import org.apache.flink.streaming.util.serialization.JSONDeserializationSchema;
+import org.apache.flink.streaming.util.serialization.SerializationSchema;
 import org.apache.flink.util.Collector;
 import org.codehaus.jackson.node.ObjectNode;
+import org.elasticsearch.action.ActionRequest;
+import org.elasticsearch.client.Requests;
 import scala.Tuple2;
 import scala.Tuple3;
 
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
-import java.util.List;
-import java.util.Properties;
-import java.util.UUID;
+import java.util.*;
 
 public class StreamingETL {
 
@@ -125,7 +131,8 @@ public class StreamingETL {
 
     }
 
-    private static class JsonFoldCounter implements FoldFunction<ObjectNode, Tuple3<Long, String, Long>> {
+    private static class JsonFoldCounter implements FoldFunction<ObjectNode,
+            Tuple3<Long, String, Long>> {
         @Override
         public Tuple3<Long, String, Long> fold(Tuple3<Long, String, Long> current, ObjectNode o) throws Exception {
             current.f0++;
@@ -133,5 +140,64 @@ public class StreamingETL {
         }
     }
 
-    private static class CountEmitter implements WindowFunction<Tuple3<Long, String, Long>, Tuple3>
+    private static class CountEmitter implements WindowFunction<Tuple3<Long, String, Long>,
+            Tuple3<Long, String, Long>, String, TimeWindow> {
+        @Override
+        public void apply(String key, TimeWindow timeWindow, Iterable<Tuple3<Long, String, Long>>
+                iterable, Collector<Tuple3<Long, String, Long>> collector) throws Exception {
+            long count = iterable.iterator().next().f0;
+            collector.collect(Tuple3.of(count, key, timeWindow.getStart()));
+        }
+    }
+
+    private static class ESRequest implements ElasticsearchSinkFunction<Tuple3<Long, String, Long>> {
+        @Override
+        public void process(Tuple3<Long, String, Long> result, RuntimeContext runtimeContext,
+           RequestIndexer requestIndexer) {
+            requestIndexer.add(createIndexRequest(result));
+        }
+
+        private ActionRequest createIndexRequest(Tuple3<Long, String, Long> result) {
+            Map<String, Object> json = new HashMap<>();
+            json.put("count", result.f0);
+            json.put("lang", result.f1);
+            json.put("window-start", result.f2);
+
+            return Requests.indexRequest().index("twitter-stats").type("stats").source(json);
+        }
+    }
+
+    private static class TopNWords implements AllWindowFunction<Tuple2<String, Long>,
+            Tuple2<Date, List<Tuple2<String, Long>>>, TimeWindow> {
+        private final int n;
+
+        public TopNWords(int n) { this.n = n; }
+
+        @Override
+        public void apply(TimeWindow timeWindow, Iterable<Tuple2<String, Long>> iterable,
+            Collector<Tuple2<Date, List<Tuple2<String, Long>>>> collector) throws Exception {
+            // put words in List
+            List<Tuple2<String, Long>> words = new ArrayList<>();
+            for(Tuple2<String, Long> word: iterable) {
+                words.add(word);
+            }
+
+            if(words.size() > 0) {
+                // sort list
+                Collections.sort(words, (o1, o2) -> -1*Long.compare(o1.f1, o2.f1));
+                // return top n
+                List<Tuple2<String, Long>> sublist = new ArrayList<>(words.subList(0,
+                        Math.min(n, words.size())));
+                collector.collect(Tuple2.of(new Date(timeWindow.getStart()), sublist));
+            }
+        }
+    }
+
+    private static class ListSerSchema implements SerializationSchema<Tuple2<Date,
+            List<Tuple2<String, Long>>>> {
+        @Override
+        public byte[] serialize(Tuple2<Date, List<Tuple2<String, Long>>> tuple2) {
+            return (tuple2.f0.toString() + "-" + tuple2.toString()).getBytes();
+        }
+    }
 }
