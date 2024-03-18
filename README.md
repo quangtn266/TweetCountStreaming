@@ -32,3 +32,8 @@ mvn clean package
 ```
 bash startStreamingETL.sh
 ```
+
+7. Start Kafka consume
+```
+bash consumeTweet.sh
+```
