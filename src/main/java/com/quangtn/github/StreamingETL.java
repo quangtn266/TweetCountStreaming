@@ -58,7 +58,7 @@ public class StreamingETL {
         env.setRestartStrategy(RestartStrategies.fixedDelayRestart(50,
                 500L));
 
-        env.setStateBackend(new FsStateBackend("file:////Users/quangtn/Desktop/01_work/" +
+        env.setStateBackend(new FsStateBackend("file:///Users/quangtn/Desktop/01_work/" +
                 "01_job/03_Flink/tweetwordcount/state_backend"));
 
         // run each operator separately
